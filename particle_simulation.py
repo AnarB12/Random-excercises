@@ -3,7 +3,6 @@ import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 from typing import List, Tuple
 
-# Set the font for the visuals to Times New Roman
 plt.rcParams['font.family'] = 'Times New Roman'
 
 
