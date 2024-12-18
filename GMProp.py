@@ -8,7 +8,7 @@ from PyQt5.QtGui import (QPen, QBrush, QColor, QImage, QPixmap, QPainterPath, QP
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QGraphicsView, QGraphicsScene, QGraphicsPathItem,
                              QToolBar, QAction, QFileDialog, QDockWidget, QWidget, QVBoxLayout, QLabel,
                              QMessageBox, QGraphicsPixmapItem, QStatusBar, QGraphicsEllipseItem,
-                             QInputDialog, QGraphicsSimpleTextItem, QPushButton)
+                             QInputDialog, QGraphicsSimpleTextItem, QPushButton, QComboBox, QSpinBox, QHBoxLayout)
 
 
 class DrawingView(QGraphicsView):
@@ -18,7 +18,7 @@ class DrawingView(QGraphicsView):
         self.setMouseTracking(True)
 
         # Grid configuration
-        self.grid_size = 50
+        self.grid_size = 10  # smaller unit spacing
         self.grid_pen = QPen(QColor(220,220,220))
         self.grid_pen.setWidth(1)
         self.axis_pen = QPen(Qt.darkGray)
@@ -31,14 +31,14 @@ class DrawingView(QGraphicsView):
         self.shapes = []
         self.node_items = []
         self.all_nodes = []
-        
+
         self.polygon_pen = QPen(QColor("blue"))
         self.polygon_pen.setWidth(2)
         self.polygon_brush = QBrush(QColor(100, 100, 255, 50))
 
         self.temp_line_pen = QPen(QColor("red"))
         self.temp_line_pen.setWidth(1)
-        
+
         self.temp_line_item = None
         self.current_polygon_item = None
 
@@ -50,11 +50,18 @@ class DrawingView(QGraphicsView):
         # Snapping to grid
         self.snap_to_grid = False
 
-        # Coordinate
+        # Coordinate text item
         self.coord_text_item = QGraphicsSimpleTextItem()
         self.coord_text_item.setBrush(QColor("black"))
         self.coord_text_item.setZValue(9999)
         self.scene().addItem(self.coord_text_item)
+
+        # Temporary length text (for showing segment lengths while drawing)
+        self.length_text_item = QGraphicsSimpleTextItem()
+        self.length_text_item.setBrush(QColor("black"))
+        self.length_text_item.setZValue(9999)
+        self.length_text_item.setVisible(False)
+        self.scene().addItem(self.length_text_item)
 
         # Undo stack
         self.undo_stack = []
@@ -66,6 +73,24 @@ class DrawingView(QGraphicsView):
 
         # Mode: light by default
         self.dark_mode = False
+
+        # Shape library mode
+        self.current_shape_mode = "Polygon"  # Can be Polygon, Rectangle, Circle, Line
+        self.temp_shape_points = []  # used for rectangle, circle, line
+
+    def setShapeMode(self, mode):
+        self.current_shape_mode = mode
+        # Reset any ongoing drawings
+        self.is_drawing = False
+        self.current_polygon_points.clear()
+        self.current_path = QPainterPath()
+        if self.current_polygon_item:
+            self.scene().removeItem(self.current_polygon_item)
+            self.current_polygon_item = None
+        if self.temp_line_item:
+            self.scene().removeItem(self.temp_line_item)
+            self.temp_line_item = None
+        self.temp_shape_points.clear()
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_Shift:
@@ -101,46 +126,94 @@ class DrawingView(QGraphicsView):
             if snapped_pos is not None:
                 scene_pos = snapped_pos
 
-            if not self.is_drawing:
-                self.startDrawingAt(scene_pos)
-                self.undo_stack.append(("start_shape", scene_pos))
-            else:
-                # Check if closing polygon
-                if len(self.current_polygon_points) > 2:
-                    first_point = self.current_polygon_points[0]
-                    if (scene_pos - first_point).manhattanLength() < 10:
-                        self.finishShape()
-                        return
+            # Handle shape modes
+            if self.current_shape_mode == "Polygon":
+                self.handlePolygonClick(scene_pos)
+            elif self.current_shape_mode == "Rectangle":
+                self.handleRectangleClick(scene_pos)
+            elif self.current_shape_mode == "Circle":
+                self.handleCircleClick(scene_pos)
+            elif self.current_shape_mode == "Line":
+                self.handleLineClick(scene_pos)
 
-                if self.fixed_line_mode:
-                    last_point = self.current_polygon_points[-1]
-                    dx = scene_pos.x() - last_point.x()
-                    dy = scene_pos.y() - last_point.y()
-
-                    if abs(dx) > abs(dy):
-                        length, ok = QInputDialog.getDouble(self, "Line Length", "Enter line length:", abs(dx), 0.1, 1e6, 2)
-                        if ok:
-                            if dx < 0:
-                                scene_pos.setX(last_point.x() - length)
-                            else:
-                                scene_pos.setX(last_point.x() + length)
-                            scene_pos.setY(last_point.y())
-                    else:
-                        length, ok = QInputDialog.getDouble(self, "Line Length", "Enter line length:", abs(dy), 0.1, 1e6, 2)
-                        if ok:
-                            if dy < 0:
-                                scene_pos.setY(last_point.y() - length)
-                            else:
-                                scene_pos.setY(last_point.y() + length)
-                            scene_pos.setX(last_point.x())
-                    self.fixed_line_mode = False
-
-                self.current_polygon_points.append(scene_pos)
-                self.current_path.lineTo(scene_pos)
-                self.current_polygon_item.setPath(self.current_path)
-
-                self.undo_stack.append(("add_point", scene_pos))
         super(DrawingView, self).mousePressEvent(event)
+
+    def handlePolygonClick(self, scene_pos):
+        if not self.is_drawing:
+            self.startDrawingAt(scene_pos)
+            self.undo_stack.append(("start_shape", scene_pos))
+        else:
+            # Check if closing polygon
+            if len(self.current_polygon_points) > 2:
+                first_point = self.current_polygon_points[0]
+                if (scene_pos - first_point).manhattanLength() < 10:
+                    self.finishPolygon()
+                    return
+
+            if self.fixed_line_mode:
+                scene_pos = self.fixedLengthLine(scene_pos)
+                self.fixed_line_mode = False
+
+            self.current_polygon_points.append(scene_pos)
+            self.current_path.lineTo(scene_pos)
+            self.current_polygon_item.setPath(self.current_path)
+
+            self.undo_stack.append(("add_point", scene_pos))
+
+    def handleRectangleClick(self, scene_pos):
+        # First click sets first corner, second click sets opposite corner
+        if len(self.temp_shape_points) == 0:
+            self.temp_shape_points.append(scene_pos)
+            self.is_drawing = True
+        else:
+            # second click
+            self.temp_shape_points.append(scene_pos)
+            self.finishRectangle()
+            self.is_drawing = False
+
+    def handleCircleClick(self, scene_pos):
+        # First click sets center, second click sets point on circumference
+        if len(self.temp_shape_points) == 0:
+            self.temp_shape_points.append(scene_pos)
+            self.is_drawing = True
+        else:
+            # second click
+            self.temp_shape_points.append(scene_pos)
+            self.finishCircle()
+            self.is_drawing = False
+
+    def handleLineClick(self, scene_pos):
+        # First click: start, second click: end
+        if len(self.temp_shape_points) == 0:
+            self.temp_shape_points.append(scene_pos)
+            self.is_drawing = True
+        else:
+            self.temp_shape_points.append(scene_pos)
+            self.finishLine()
+            self.is_drawing = False
+
+    def fixedLengthLine(self, scene_pos):
+        last_point = self.current_polygon_points[-1]
+        dx = scene_pos.x() - last_point.x()
+        dy = scene_pos.y() - last_point.y()
+
+        if abs(dx) > abs(dy):
+            length, ok = QInputDialog.getDouble(self, "Line Length", "Enter line length:", abs(dx), 0.1, 1e6, 2)
+            if ok:
+                if dx < 0:
+                    scene_pos.setX(last_point.x() - length)
+                else:
+                    scene_pos.setX(last_point.x() + length)
+                scene_pos.setY(last_point.y())
+        else:
+            length, ok = QInputDialog.getDouble(self, "Line Length", "Enter line length:", abs(dy), 0.1, 1e6, 2)
+            if ok:
+                if dy < 0:
+                    scene_pos.setY(last_point.y() - length)
+                else:
+                    scene_pos.setY(last_point.y() + length)
+                scene_pos.setX(last_point.x())
+        return scene_pos
 
     def mouseMoveEvent(self, event):
         if self.middle_mouse_pressed:
@@ -162,23 +235,56 @@ class DrawingView(QGraphicsView):
         else:
             self.unhighlightNode()
 
-        if self.is_drawing and len(self.current_polygon_points) > 0:
-            last_point = self.current_polygon_points[-1]
-            if self.shift_pressed:
-                dx = scene_pos.x() - last_point.x()
-                dy = scene_pos.y() - last_point.y()
-                if abs(dx) > abs(dy):
-                    scene_pos.setY(last_point.y())
-                else:
-                    scene_pos.setX(last_point.x())
+        self.updateTemporaryLine(scene_pos)
 
+    def updateTemporaryLine(self, scene_pos):
+        if not self.is_drawing:
+            self.length_text_item.setVisible(False)
+            return
+
+        # Show segment length while drawing
+        # Depends on shape mode
+        start_point = None
+        if self.current_shape_mode == "Polygon" and len(self.current_polygon_points) > 0:
+            start_point = self.current_polygon_points[-1]
+        elif self.current_shape_mode == "Rectangle" and len(self.temp_shape_points) > 0:
+            start_point = self.temp_shape_points[0]
+        elif self.current_shape_mode == "Circle" and len(self.temp_shape_points) > 0:
+            start_point = self.temp_shape_points[0]
+        elif self.current_shape_mode == "Line" and len(self.temp_shape_points) > 0:
+            start_point = self.temp_shape_points[0]
+
+        if start_point is not None:
+            current_line_length = (scene_pos - start_point).manhattanLength()
+            # If shift is pressed, adjust movement for polygon mode
+            if self.shift_pressed and self.current_shape_mode == "Polygon":
+                dx = scene_pos.x() - start_point.x()
+                dy = scene_pos.y() - start_point.y()
+                if abs(dx) > abs(dy):
+                    scene_pos.setY(start_point.y())
+                else:
+                    scene_pos.setX(start_point.x())
+                current_line_length = (scene_pos - start_point).manhattanLength()
+
+            # Remove old temp line
             if self.temp_line_item:
                 self.scene().removeItem(self.temp_line_item)
-            line_path = QPainterPath(self.current_polygon_points[-1])
+                self.temp_line_item = None
+
+            # Draw new temp line
+            line_path = QPainterPath(start_point)
             line_path.lineTo(scene_pos)
             self.temp_line_item = QGraphicsPathItem(line_path)
             self.temp_line_item.setPen(self.temp_line_pen)
             self.scene().addItem(self.temp_line_item)
+
+            # Show length text
+            dist = math.hypot(scene_pos.x() - start_point.x(), scene_pos.y() - start_point.y())
+            self.length_text_item.setText(f"Length: {dist:.2f}")
+            self.length_text_item.setPos((start_point.x() + scene_pos.x())/2 + 10, (start_point.y() + scene_pos.y())/2)
+            self.length_text_item.setVisible(True)
+        else:
+            self.length_text_item.setVisible(False)
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.MiddleButton:
@@ -197,7 +303,7 @@ class DrawingView(QGraphicsView):
         self.is_drawing = True
         self.current_polygon_points = [start_pos]
         self.current_path = QPainterPath(start_pos)
-        
+
         if self.current_polygon_item:
             self.scene().removeItem(self.current_polygon_item)
         self.current_polygon_item = QGraphicsPathItem()
@@ -205,7 +311,7 @@ class DrawingView(QGraphicsView):
         self.current_polygon_item.setBrush(self.polygon_brush)
         self.scene().addItem(self.current_polygon_item)
 
-    def finishShape(self):
+    def finishPolygon(self):
         if self.is_drawing and len(self.current_polygon_points) > 2:
             self.current_path.closeSubpath()
             self.current_polygon_item.setPath(self.current_path)
@@ -222,6 +328,67 @@ class DrawingView(QGraphicsView):
             if self.temp_line_item:
                 self.scene().removeItem(self.temp_line_item)
                 self.temp_line_item = None
+
+            self.length_text_item.setVisible(False)
+
+    def finishRectangle(self):
+        # Two points define a rectangle
+        if len(self.temp_shape_points) == 2:
+            p1 = self.temp_shape_points[0]
+            p2 = self.temp_shape_points[1]
+            rect_coords = [QPointF(p1.x(), p1.y()),
+                           QPointF(p2.x(), p1.y()),
+                           QPointF(p2.x(), p2.y()),
+                           QPointF(p1.x(), p2.y())]
+            self.shapes.append(rect_coords)
+            self.addPolygonToScene(rect_coords)
+            self.temp_shape_points.clear()
+
+    def finishCircle(self):
+        # Two points define a circle: first = center, second = point on circumference
+        if len(self.temp_shape_points) == 2:
+            center = self.temp_shape_points[0]
+            perimeter = self.temp_shape_points[1]
+            radius = math.hypot(perimeter.x() - center.x(), perimeter.y() - center.y())
+
+            # Approximate circle as polygon
+            circle_points = []
+            num_segments = 64
+            for i in range(num_segments):
+                angle = 2*math.pi*i/num_segments
+                x = center.x() + radius*math.cos(angle)
+                y = center.y() + radius*math.sin(angle)
+                circle_points.append(QPointF(x,y))
+            self.shapes.append(circle_points)
+            self.addPolygonToScene(circle_points)
+            self.temp_shape_points.clear()
+
+    def finishLine(self):
+        # Two points define a line
+        if len(self.temp_shape_points) == 2:
+            line_coords = self.temp_shape_points
+            self.shapes.append(line_coords)
+            self.addPolygonToScene(line_coords, is_line=True)
+            self.temp_shape_points.clear()
+
+    def addPolygonToScene(self, coords, is_line=False):
+        path = QPainterPath(coords[0])
+        for p in coords[1:]:
+            path.lineTo(p)
+        if not is_line:
+            path.closeSubpath()
+        item = QGraphicsPathItem()
+        item.setPen(self.polygon_pen)
+        item.setBrush(self.polygon_brush if not is_line else Qt.NoBrush)
+        self.scene().addItem(item)
+        item.setPath(path)
+        self.addNodeMarkers(coords)
+
+        # Cleanup temporary line
+        if self.temp_line_item:
+            self.scene().removeItem(self.temp_line_item)
+            self.temp_line_item = None
+        self.length_text_item.setVisible(False)
 
     def addNodeMarkers(self, polygon_points):
         for pt in polygon_points:
@@ -297,7 +464,19 @@ class DrawingView(QGraphicsView):
 
     def rebuildScene(self):
         self.scene().clear()
+
+        # Re-create coord_text_item and length_text_item after clearing
+        self.coord_text_item = QGraphicsSimpleTextItem()
+        self.coord_text_item.setBrush(QColor("black"))
+        self.coord_text_item.setZValue(9999)
         self.scene().addItem(self.coord_text_item)
+
+        self.length_text_item = QGraphicsSimpleTextItem()
+        self.length_text_item.setBrush(QColor("black"))
+        self.length_text_item.setZValue(9999)
+        self.length_text_item.setVisible(False)
+        self.scene().addItem(self.length_text_item)
+
         self.node_items.clear()
         self.all_nodes.clear()
 
@@ -305,12 +484,20 @@ class DrawingView(QGraphicsView):
             path = QPainterPath(poly[0])
             for p in poly[1:]:
                 path.lineTo(p)
-            path.closeSubpath()
-            item = QGraphicsPathItem()
-            item.setPen(self.polygon_pen)
-            item.setBrush(self.polygon_brush)
-            self.scene().addItem(item)
-            item.setPath(path)
+            # Check if it is a line or polygon by checking if start and end differ
+            if len(poly) > 2:
+                path.closeSubpath()
+                item = QGraphicsPathItem()
+                item.setPen(self.polygon_pen)
+                item.setBrush(self.polygon_brush)
+                self.scene().addItem(item)
+                item.setPath(path)
+            else:
+                item = QGraphicsPathItem()
+                item.setPen(self.polygon_pen)
+                item.setBrush(Qt.NoBrush)
+                self.scene().addItem(item)
+                item.setPath(path)
             self.addNodeMarkers(poly)
 
         parent = self.parent()
@@ -359,12 +546,17 @@ class DrawingView(QGraphicsView):
         # Update coordinate text color
         if self.dark_mode:
             self.coord_text_item.setBrush(QColor("white"))
+            self.length_text_item.setBrush(QColor("white"))
         else:
             self.coord_text_item.setBrush(QColor("black"))
-
+            self.length_text_item.setBrush(QColor("black"))
 
     def setSnapToGrid(self, snap):
         self.snap_to_grid = snap
+
+    def setGridSize(self, size):
+        self.grid_size = size
+        self.viewport().update()
 
 
 class PropertiesDock(QWidget):
@@ -523,12 +715,11 @@ class PropertiesDock(QWidget):
             self.save_button.setStyleSheet("")
 
 
-
 class MainWindow(QMainWindow):
     def __init__(self):
         super(MainWindow, self).__init__()
 
-        self.setWindowTitle("Advanced CAD-like Shape Drawing and Analysis Tool")
+        self.setWindowTitle("Shape Drawing and Analysis Tool")
 
         self.scene = QGraphicsScene()
         self.view = DrawingView(self.scene)
@@ -546,13 +737,17 @@ class MainWindow(QMainWindow):
         self.toolbar = QToolBar("Main Toolbar")
         self.addToolBar(self.toolbar)
 
+        self.shape_toolbar = QToolBar("Shape Library")
+        self.addToolBar(self.shape_toolbar)
+
         self.initToolbar()
+        self.initShapeToolbar()
 
         self.background_image_item = None
         self.statusbar.showMessage("Ready.")
 
-        # Set initial scene rect around origin
-        self.scene.setSceneRect(-500,-500,1000,1000)
+        # Set initial scene rect around a smaller range
+        self.scene.setSceneRect(-100,-100,200,200)
         self.view.fitInView(self.scene.sceneRect(), Qt.KeepAspectRatio)
 
         self.drawAxes()
@@ -562,13 +757,13 @@ class MainWindow(QMainWindow):
         self.applyTheme()
 
     def initToolbar(self):
-        new_action = QAction("New Shape", self)
-        new_action.setStatusTip("Start drawing a new shape")
+        new_action = QAction("New Shape (Polygon)", self)
+        new_action.setStatusTip("Start drawing a new polygonal shape")
         new_action.triggered.connect(self.newShape)
         self.toolbar.addAction(new_action)
 
-        finish_action = QAction("Finish Shape", self)
-        finish_action.setStatusTip("Finish the current shape")
+        finish_action = QAction("Finish Polygon", self)
+        finish_action.setStatusTip("Finish the current polygon")
         finish_action.triggered.connect(self.finishShape)
         self.toolbar.addAction(finish_action)
 
@@ -613,8 +808,37 @@ class MainWindow(QMainWindow):
         exit_action.triggered.connect(self.close)
         self.toolbar.addAction(exit_action)
 
+    def initShapeToolbar(self):
+        # Shape selection combo box
+        shape_label = QLabel("Shape:")
+        shape_combo = QComboBox()
+        shape_combo.addItems(["Polygon", "Rectangle", "Circle", "Line"])
+        shape_combo.currentTextChanged.connect(self.changeShapeMode)
+
+        # Grid size adjust
+        grid_label = QLabel("Grid Size:")
+        grid_spin = QSpinBox()
+        grid_spin.setRange(1, 1000)
+        grid_spin.setValue(self.view.grid_size)
+        grid_spin.valueChanged.connect(self.view.setGridSize)
+
+        shape_layout = QHBoxLayout()
+        shape_widget = QWidget()
+        shape_layout.addWidget(shape_label)
+        shape_layout.addWidget(shape_combo)
+        shape_layout.addWidget(grid_label)
+        shape_layout.addWidget(grid_spin)
+        shape_widget.setLayout(shape_layout)
+
+        self.shape_toolbar.addWidget(shape_widget)
+
+    def changeShapeMode(self, mode):
+        self.view.setShapeMode(mode)
+        self.statusbar.showMessage(f"Shape mode changed to {mode}")
+
     def newShape(self):
-        choice = QMessageBox.question(self, "Start New Shape",
+        self.view.setShapeMode("Polygon")
+        choice = QMessageBox.question(self, "Start New Polygon",
                                       "Do you want to pick start point by clicking on canvas?",
                                       QMessageBox.Yes | QMessageBox.No)
         if choice == QMessageBox.Yes:
@@ -627,7 +851,7 @@ class MainWindow(QMainWindow):
             if self.view.temp_line_item:
                 self.scene.removeItem(self.view.temp_line_item)
                 self.view.temp_line_item = None
-            self.statusbar.showMessage("Click on the canvas to start drawing a new shape.")
+            self.statusbar.showMessage("Click on the canvas to start drawing a new polygon.")
         else:
             x, ok1 = QInputDialog.getDouble(self, "Start X", "Enter X coordinate:", 0.0, -1e6, 1e6, 2)
             if not ok1:
@@ -646,11 +870,14 @@ class MainWindow(QMainWindow):
                 self.view.temp_line_item = None
             self.view.startDrawingAt(QPointF(x,y))
             self.view.undo_stack.append(("start_shape", QPointF(x,y)))
-            self.statusbar.showMessage("Started new shape at given coordinates.")
+            self.statusbar.showMessage("Started new polygon at given coordinates.")
 
     def finishShape(self):
-        self.view.finishShape()
-        self.statusbar.showMessage("Shape finished.")
+        if self.view.current_shape_mode == "Polygon":
+            self.view.finishPolygon()
+            self.statusbar.showMessage("Polygon finished.")
+        else:
+            self.statusbar.showMessage("Not in polygon mode. Finish shape not applicable.")
 
     def clearCanvas(self):
         self.scene.clear()
@@ -665,9 +892,19 @@ class MainWindow(QMainWindow):
         self.properties_dock.setProperties(None)
         self.statusbar.showMessage("Canvas cleared.")
 
-        # Re-add coordinate and reset scene rect to near origin
+        # Re-create coord and length items after clearing
+        self.view.coord_text_item = QGraphicsSimpleTextItem()
+        self.view.coord_text_item.setBrush(QColor("black"))
+        self.view.coord_text_item.setZValue(9999)
         self.scene.addItem(self.view.coord_text_item)
-        self.scene.setSceneRect(-500,-500,1000,1000)
+
+        self.view.length_text_item = QGraphicsSimpleTextItem()
+        self.view.length_text_item.setBrush(QColor("black"))
+        self.view.length_text_item.setZValue(9999)
+        self.view.length_text_item.setVisible(False)
+        self.scene.addItem(self.view.length_text_item)
+
+        self.scene.setSceneRect(-100,-100,200,200)
         self.view.fitInView(self.scene.sceneRect(), Qt.KeepAspectRatio)
         self.drawAxes()
 
@@ -678,7 +915,7 @@ class MainWindow(QMainWindow):
             if img is None:
                 QMessageBox.warning(self, "Error", "Could not load image.")
                 return
-            
+
             height, width, channels = img.shape
             bytes_per_line = 3 * width
             qimg = QImage(img.data, width, height, bytes_per_line, QImage.Format_BGR888)
@@ -744,7 +981,6 @@ class MainWindow(QMainWindow):
             palette.setColor(QPalette.Button, QColor(45,45,45))
             palette.setColor(QPalette.ButtonText, Qt.white)
             palette.setColor(QPalette.BrightText, Qt.red)
-
             palette.setColor(QPalette.Highlight, QColor(64,128,128))
             palette.setColor(QPalette.HighlightedText, Qt.black)
 
