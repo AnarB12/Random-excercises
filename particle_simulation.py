@@ -190,8 +190,14 @@ class PhysicsEnvironment:
 
                 # If particles overlap, handle collision
                 if distance < min_distance:
-                    # Compute the normal vector from p1 to p2
-                    normal = (p2.position - p1.position) / distance
+                    # Avoid division by zero if particles occupy the same point
+                    if distance == 0:
+                        # Arbitrary normal to separate completely overlapping particles
+                        normal = np.array([1.0, 0.0])
+                        distance = min_distance
+                    else:
+                        # Compute the normal vector from p1 to p2
+                        normal = (p2.position - p1.position) / distance
                     relative_velocity = p2.velocity - p1.velocity
                     velocity_along_normal = np.dot(relative_velocity, normal)
 
